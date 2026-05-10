@@ -1,0 +1,55 @@
+after installing requirements:
+
+Step 3: Verify the Data Loads Correctly
+python dataset.py
+
+
+Step 4: Train the Model
+Create and run a training script:
+
+bash
+
+python -c "from dataset import load_all_splits; from model import train_pipeline; splits = load_all_splits('./data'); model = train_pipeline(base_model_name='resnet50', train_ds=splits['train'], val_ds=splits['val'], feature_epochs=5, fine_tune_epochs=4)"
+
+
+This will
+
+Step 1 (Feature Extraction): Freeze base, train the classifier head (10 epochs)
+Step 2 (Fine-Tuning): Unfreeze top 20 base layers, train with low LR (10 epochs)
+Save best_model.keras and final_model.keras into models/ 
+
+
+Step 5: Evaluate the Model
+bash
+
+python -c "from dataset import load_all_splits; from model import load_trained_model; from xai import evaluate_model; splits = load_all_splits('./data'); model = load_trained_model('./models/best_model.keras'); results = evaluate_model(model, splits['test'], save_dir='logs')"
+
+This prints Accuracy/Precision/Recall/F1 and saves a confusion matrix PNG to logs/.
+
+
+Step 6: Start the FastAPI Server
+bash
+
+uvicorn api:app --host 0.0.0.0 --port 8000
+Test it in a new terminal:
+
+
+
+
+
+
+Step 7: Start the Streamlit Web App
+Open a new terminal (keep the API running):
+
+streamlit run app.py
+
+
+
+
+python -m uvicorn api:app --host 0.0.0.0 --port 8000
+
+
+python -m streamlit run app.py
+
+
+

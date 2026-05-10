@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Dataset folders
+data/
+dataset/
+datasets/
+
+# Trained models / checkpoints
+models/
+checkpoints/
+*.h5
+*.keras
+*.pt
+*.pth
+*.onnx
+
+# Logs and databases
+logs/
+*.log
+*.csv
+*.sqlite
+*.db
+
+# Secrets
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
