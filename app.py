@@ -336,7 +336,7 @@ def render_main_area(config: dict):
     )
 
     if heatmap_fig is not None:
-        if isinstance(heatmap_fig, plt.Figure):
+        if isinstance(heatmap_fig, Figure):
             st.pyplot(heatmap_fig)
         elif isinstance(heatmap_fig, Image.Image):
             st.image(heatmap_fig, use_container_width=True)
