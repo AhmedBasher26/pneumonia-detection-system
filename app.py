@@ -1,29 +1,27 @@
 """
-app.py — Phase 5: Deployment Pipeline (Streamlit Web App)
+app.py — Streamlit Web App for Pneumonia Detection
 
-Provides a simple UI for a user to upload a chest X-ray image,
-run it through the model (locally or via the FastAPI endpoint),
-and display the prediction results alongside the Grad-CAM visualization.
+Cloud-ready version:
+- Loads best_model.keras from Hugging Face Hub.
+- Uses Local Model mode by default.
+- Prevents localhost API errors on Streamlit Cloud.
+- Makes Grad-CAM optional, so a Grad-CAM rendering error does not stop prediction.
 """
 
 import os
 import io
 import base64
-from typing import Optional
+from typing import Optional, Any
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
+
 from PIL import Image
-
-
-import numpy as np
 import streamlit as st
 import tensorflow as tf
 from tensorflow.keras import Model  # type: ignore
-from PIL import Image
-import matplotlib
-matplotlib.use("Agg")  # Non-interactive backend for Streamlit
-import matplotlib.pyplot as plt
+from huggingface_hub import hf_hub_download
 
 # ---------------------------------------------------------------------------
 # Import project modules
@@ -43,8 +41,9 @@ from reliability import (
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "best_model.keras")
-API_URL = os.environ.get("API_URL", "http://localhost:8000")
+HF_REPO_ID = "Ahmedb2612/pneumonia-detection-model"
+HF_MODEL_FILENAME = "best_model.keras"
+API_URL = os.environ.get("API_URL", "").strip()
 
 # ---------------------------------------------------------------------------
 # Page Configuration
@@ -57,24 +56,22 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------------------------
-# Model Loading (cached)
+# Model Loading
 # ---------------------------------------------------------------------------
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading model from Hugging Face...")
 def load_model() -> Optional[Model]:
     """Load the trained Keras model from Hugging Face Hub."""
     try:
-        from huggingface_hub import hf_hub_download
-
         model_path = hf_hub_download(
-            repo_id="Ahmedb2612/pneumonia-detection-model",
-            filename="best_model.keras"
+            repo_id=HF_REPO_ID,
+            filename=HF_MODEL_FILENAME,
         )
-
         return tf.keras.models.load_model(model_path, compile=False)
-
     except Exception as e:
         st.error(f"Failed to load model from Hugging Face: {e}")
         return None
+
+
 # ---------------------------------------------------------------------------
 # Local Prediction Pipeline
 # ---------------------------------------------------------------------------
@@ -83,31 +80,14 @@ def predict_local(
     image_path: str,
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
 ) -> dict:
-    """
-    Run prediction using the locally loaded model.
+    """Run prediction using the Hugging Face-loaded Keras model."""
 
-    Steps:
-        1. Validate input image.
-        2. Preprocess image.
-        3. Run model inference.
-        4. Apply confidence thresholding.
-        5. Generate Grad-CAM heatmap.
-        6. Log the prediction.
-
-    Args:
-        model:               Trained Keras model.
-        image_path:          Path to the uploaded image.
-        confidence_threshold: Minimum confidence for certain prediction.
-
-    Returns:
-        dict with prediction, confidence, heatmap figure, etc.
-    """
-    # Step 1: Validate
+    # Step 1: Validate input image
     is_valid, msg = validate_image_input(image_path)
     if not is_valid:
         raise InputValidationError(f"Input validation failed: {msg}")
 
-    # Step 2: Preprocess
+    # Step 2: Preprocess image
     image_tensor = preprocess_single_image(image_path)
 
     # Step 3: Inference
@@ -116,16 +96,21 @@ def predict_local(
     # Step 4: Confidence thresholding
     result = apply_confidence_threshold(probability, confidence_threshold)
 
-    # Step 5: Grad-CAM
-    heatmap = grad_cam(model, image_tensor)
-    original_image = image_tensor[0].numpy()
-    fig = visualize_grad_cam(original_image, heatmap, alpha=0.4)
+    # Step 5: Grad-CAM is optional. Do not let Grad-CAM crash the prediction.
+    heatmap_fig: Optional[Any] = None
+    gradcam_error: Optional[str] = None
+    try:
+        heatmap = grad_cam(model, image_tensor)
+        original_image = image_tensor[0].numpy()
+        heatmap_fig = visualize_grad_cam(original_image, heatmap, alpha=0.4)
+    except Exception as e:
+        gradcam_error = str(e)
 
-    # Step 6: Log
+    # Step 6: Logging is optional. Do not let logging crash the UI.
     try:
         log_prediction(image_path, result, DEFAULT_DB_PATH, DEFAULT_CSV_PATH)
     except Exception:
-        pass  # Non-critical; don't block the UI
+        pass
 
     return {
         "prediction": result.label,
@@ -133,27 +118,19 @@ def predict_local(
         "probability": result.probability,
         "is_uncertain": result.is_uncertain,
         "recommendation": result.recommendation,
-        "heatmap_fig": fig,
+        "heatmap_fig": heatmap_fig,
+        "gradcam_error": gradcam_error,
     }
 
 
 # ---------------------------------------------------------------------------
-# API Prediction Pipeline (calls FastAPI endpoint)
+# API Prediction Pipeline
 # ---------------------------------------------------------------------------
 def predict_api(image_bytes: bytes, filename: str) -> dict:
-    """
-    Run prediction by calling the FastAPI /predict endpoint.
-
-    Args:
-        image_bytes: Raw image bytes.
-        filename:    Original filename.
-
-    Returns:
-        dict with prediction, confidence, heatmap base64, etc.
-    """
+    """Run prediction by calling a deployed FastAPI /predict endpoint."""
     import requests
 
-    if API_URL.strip().rstrip("/") in {"", "http://localhost:8000", "http://127.0.0.1:8000"}:
+    if not API_URL or API_URL.rstrip("/") in {"http://localhost:8000", "http://127.0.0.1:8000"}:
         raise RuntimeError(
             "API endpoint is not configured for cloud deployment. "
             "Use Local Model mode, or set API_URL to a deployed FastAPI URL."
@@ -176,48 +153,44 @@ def render_sidebar() -> dict:
     st.sidebar.title("⚙️ Configuration")
     st.sidebar.markdown("---")
 
-    # Prediction mode
     mode = st.sidebar.radio(
         "Prediction Mode",
         options=["Local Model", "API Endpoint"],
         index=0,
-        help="Choose whether to use a locally loaded model or call the FastAPI endpoint.",
+        help="Use Local Model on Streamlit Cloud. API mode requires a deployed FastAPI URL.",
     )
 
-    # Confidence threshold slider
     threshold = st.sidebar.slider(
         "Confidence Threshold",
         min_value=0.50,
         max_value=0.99,
         value=DEFAULT_CONFIDENCE_THRESHOLD,
         step=0.01,
-        help="Predictions below this confidence are flagged as 'Uncertain'.",
+        help="Predictions below this confidence are flagged as uncertain.",
     )
 
-    # Model info
     st.sidebar.markdown("---")
     st.sidebar.subheader("Model Info")
     model = load_model()
     if model is not None:
         st.sidebar.success("✅ Model loaded from Hugging Face")
-        st.sidebar.caption("Source: `Ahmedb2612/pneumonia-detection-model/best_model.keras`")
+        st.sidebar.caption(f"Source: `{HF_REPO_ID}/{HF_MODEL_FILENAME}`")
     else:
         st.sidebar.error("❌ Model failed to load")
-        st.sidebar.caption("Check Hugging Face model file and app logs.")
+        st.sidebar.caption("Check the Hugging Face model repository and Streamlit logs.")
 
     return {"mode": mode, "threshold": threshold}
 
 
-def render_main_area(config: dict):
+def render_main_area(config: dict) -> None:
     """Render the main content area with upload and results."""
     st.title("🩻 Pneumonia Detection System")
     st.markdown(
-        "Upload a chest X-ray image to get an AI-assisted diagnosis with "
-        "explainability (Grad-CAM heatmap)."
+        "Upload a chest X-ray image to get an AI-assisted diagnosis. "
+        "Grad-CAM is displayed when available."
     )
     st.markdown("---")
 
-    # File uploader
     uploaded_file = st.file_uploader(
         "📤 Upload Chest X-ray",
         type=["jpg", "jpeg", "png", "bmp", "tiff"],
@@ -228,52 +201,39 @@ def render_main_area(config: dict):
         st.info("👆 Upload an image to begin diagnosis.")
         return
 
-    # --- Save uploaded file to a temp path ---
     tmp_dir = os.path.join(os.path.dirname(__file__), "logs", "uploads")
     os.makedirs(tmp_dir, exist_ok=True)
     tmp_path = os.path.join(tmp_dir, uploaded_file.name)
     with open(tmp_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    # --- Display uploaded image ---
     col1, col2 = st.columns([1, 2])
     with col1:
         st.subheader("Uploaded X-ray")
         st.image(uploaded_file, use_container_width=True)
 
-    # --- Run prediction ---
     with st.spinner("🔍 Analyzing X-ray..."):
         try:
             if config["mode"] == "Local Model":
                 model = load_model()
                 if model is None:
-                    st.error(
-                        "Model failed to load from Hugging Face. "
-                        "Check the repository name, filename, and Streamlit logs."
-                    )
+                    st.error("Model failed to load from Hugging Face. Check the app logs.")
                     return
-                result = predict_local(
-                    model, tmp_path, config["threshold"]
-                )
-                # Extract heatmap figure from local prediction
+                result = predict_local(model, tmp_path, config["threshold"])
                 heatmap_fig = result.get("heatmap_fig")
             else:
-                # API mode
-                api_result = predict_api(
-                    uploaded_file.getvalue(), uploaded_file.name
-                )
+                api_result = predict_api(uploaded_file.getvalue(), uploaded_file.name)
                 result = {
                     "prediction": api_result["prediction"],
                     "confidence": api_result["confidence"],
                     "probability": api_result["probability"],
                     "is_uncertain": api_result["is_uncertain"],
                     "recommendation": api_result["recommendation"],
+                    "gradcam_error": None,
                 }
-                # Decode base64 heatmap from API
                 heatmap_fig = None
                 if api_result.get("grad_cam_heatmap"):
-                    heatmap_b64 = api_result["grad_cam_heatmap"]
-                    heatmap_bytes = base64.b64decode(heatmap_b64)
+                    heatmap_bytes = base64.b64decode(api_result["grad_cam_heatmap"])
                     heatmap_fig = Image.open(io.BytesIO(heatmap_bytes))
 
         except InputValidationError as e:
@@ -282,12 +242,16 @@ def render_main_area(config: dict):
         except Exception as e:
             st.error(f"❌ Prediction failed: {e}")
             return
+        finally:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    pass
 
-    # --- Display results ---
     with col2:
         st.subheader("Diagnosis Result")
 
-        # Prediction label with color coding
         if result["prediction"] == "Pneumonia":
             if result["is_uncertain"]:
                 st.warning("⚠️ **PNEUMONIA** (Uncertain)")
@@ -299,57 +263,48 @@ def render_main_area(config: dict):
             else:
                 st.success("🟢 **NORMAL**")
 
-        # Metrics
         st.metric("Confidence", f"{result['confidence']:.1%}")
         st.metric("Raw Probability", f"{result['probability']:.4f}")
 
-        # Uncertainty flag
         if result["is_uncertain"]:
             st.warning(
                 "⚡ **UNCERTAIN PREDICTION** — Confidence is below the "
-                f"threshold ({config['threshold']:.0%}). "
-                "This case should be reviewed by a radiologist."
+                f"threshold ({config['threshold']:.0%}). This case should be reviewed."
             )
 
-        # Recommendation
         st.info(f"📋 **Recommendation:** {result['recommendation']}")
 
-    # --- Display Grad-CAM heatmap ---
     st.markdown("---")
     st.subheader("🔬 Explainability — Grad-CAM Heatmap")
     st.markdown(
-        "The heatmap highlights the image regions the model focused on "
-        "for its prediction. Red areas indicate high importance."
+        "The heatmap highlights the image regions the model focused on. "
+        "If unavailable, the diagnosis result above still completed successfully."
     )
 
     if heatmap_fig is not None:
-        if isinstance(heatmap_fig, Figure):
+        # Duck typing avoids isinstance errors caused by Matplotlib/PIL version differences.
+        if hasattr(heatmap_fig, "savefig"):
             st.pyplot(heatmap_fig)
-        elif isinstance(heatmap_fig, Image.Image):
+        else:
             st.image(heatmap_fig, use_container_width=True)
     else:
-        st.warning("Grad-CAM heatmap not available.")
+        err = result.get("gradcam_error")
+        if err:
+            st.warning(f"Grad-CAM heatmap not available: {err}")
+        else:
+            st.warning("Grad-CAM heatmap not available.")
 
-    # --- Disclaimer ---
     st.markdown("---")
     st.caption(
-        "⚠️ **Disclaimer:** This system is for research and assistive "
-        "purposes only. It is NOT a substitute for professional medical "
-        "diagnosis. Always consult a qualified healthcare provider."
+        "⚠️ **Disclaimer:** This system is for research and assistive purposes only. "
+        "It is NOT a substitute for professional medical diagnosis. Always consult a qualified healthcare provider."
     )
-
-    # --- Clean up temp file ---
-    if os.path.exists(tmp_path):
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
 
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-def main():
+def main() -> None:
     config = render_sidebar()
     render_main_area(config)
 
