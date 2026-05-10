@@ -239,7 +239,7 @@ def _build_grad_cam_model(
                     if comp_layer == layer:
                         found_base = True
                         continue
-                    if found_base and not isinstance(comp_layer, tf.keras.layers.Input):
+                    if found_base and not isinstance(comp_layer, tf.keras.layers.InputLayer):
                         x = comp_layer(x)
 
                 grad_model = Model(
